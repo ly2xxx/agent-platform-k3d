@@ -1,0 +1,33 @@
+{{- if .Values.namespaces.create }}
+{{- $ctx := . }}
+{{- range $key, $ns := dict "platform" .Values.namespaces.platform "apps" .Values.namespaces.apps }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  annotations:
+    {{- /*
+      Helm writes the release secret into .Release.Namespace BEFORE it applies any
+      manifest, so that namespace has to exist first - a chart cannot bootstrap the
+      namespace it is installed into. Declaring the ownership metadata Helm would
+      have added anyway makes these objects adoptable, so the documented one-liner
+
+        helm template <rel> . -n <ns> -f <values> -s templates/00-namespaces.yaml | kubectl apply -f -
+
+      creates them and the subsequent `helm install` takes ownership cleanly
+      instead of failing the ownership check.
+    */}}
+    meta.helm.sh/release-name: {{ $ctx.Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ $ctx.Release.Namespace | quote }}
+    {{- if $ctx.Values.rancher.projectId }}
+    field.cattle.io/projectId: {{ $ctx.Values.rancher.projectId | quote }}
+    {{- end }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" $ctx "component" $key "partOf" (ternary "besa-ai-platform" "besa-agent-platform" (eq $key "platform"))) | nindent 4 }}
+    environment: local-dev
+    {{- if $ctx.Values.rancher.projectName }}
+    field.cattle.io/projectId: {{ $ctx.Values.rancher.projectName | quote }}
+    {{- end }}
+{{- end }}
+{{- end }}

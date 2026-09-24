@@ -1,0 +1,87 @@
+{{- if .Values.platform.milvus.enabled }}
+{{- $m := .Values.platform.milvus }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: milvus
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "milvus" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: milvus
+    tier: data-observability
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "milvus") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "milvus" "partOf" "besa-ai-platform" "name" "milvus") | nindent 8 }}
+        tier: data-observability
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: milvus
+          image: {{ $m.image }}
+          imagePullPolicy: {{ $m.imagePullPolicy }}
+          command: ["milvus", "run", "standalone"]
+          env:
+            - name: ETCD_USE_EMBED
+              value: "true"
+            - name: ETCD_DATA_DIR
+              value: "/var/lib/milvus/etcd"
+            - name: COMMON_STORAGETYPE
+              value: "local"
+          ports:
+            - containerPort: {{ $m.port }}
+              name: milvus
+            - containerPort: {{ $m.metricsPort }}
+              name: metrics
+          volumeMounts:
+            - name: milvus-data
+              mountPath: /var/lib/milvus
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $m.metricsPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $m.metricsPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml $m.resources | nindent 12 }}
+      volumes:
+        - name: milvus-data
+          persistentVolumeClaim:
+            claimName: pvc-milvus-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "milvus" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: milvus
+    tier: data-observability
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "milvus") | nindent 4 }}
+  ports:
+    - name: milvus
+      port: {{ $m.port }}
+      targetPort: {{ $m.port }}
+    - name: metrics
+      port: {{ $m.metricsPort }}
+      targetPort: {{ $m.metricsPort }}
+{{- end }}

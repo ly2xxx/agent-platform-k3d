@@ -1,0 +1,98 @@
+{{- if .Values.apps.sandbox.enabled }}
+{{- $a := .Values.apps }}
+{{- $c := .Values.apps.sandbox }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-config
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "headless-browser" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: headless-browser
+    tier: agent-runtime
+data:
+  server.py: |
+{{ .Files.Get "files/sandbox/server.py" | indent 4 }}
+  {{- include "besa.curlShim" . | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headless-browser
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "headless-browser" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: headless-browser
+    tier: agent-runtime
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "headless-browser") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "headless-browser" "partOf" "besa-agent-platform" "name" "headless-browser") | nindent 8 }}
+        tier: agent-runtime
+      annotations:
+        checksum/code: {{ .Files.Get "files/sandbox/server.py" | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: headless-browser
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/sandbox/curl /usr/local/bin/curl && chmod +x /usr/local/bin/curl
+              python /etc/sandbox/server.py
+          ports:
+            - containerPort: {{ $c.port }}
+              name: cdp
+          volumeMounts:
+            - name: sandbox-config-volume
+              mountPath: /etc/sandbox
+          readinessProbe:
+            httpGet:
+              path: /json/version
+              port: {{ $c.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /json/version
+              port: {{ $c.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: sandbox-config-volume
+          configMap:
+            name: sandbox-config
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headless-browser
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "headless-browser" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: headless-browser
+    tier: agent-runtime
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "headless-browser") | nindent 4 }}
+  ports:
+    - name: cdp
+      port: {{ $c.port }}
+      targetPort: {{ $c.port }}
+{{- end }}

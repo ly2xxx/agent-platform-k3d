@@ -1,0 +1,6 @@
+# CI renders the chart here
+rendered/
+__pycache__/
+*.pyc
+# Personal overrides (helm -f my.local.yaml). Real values go here, never in values.yaml.
+*.local.yaml

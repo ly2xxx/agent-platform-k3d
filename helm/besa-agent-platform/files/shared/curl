@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import sys, urllib.request
+args = sys.argv[1:]
+url = None
+method = 'GET'
+data = None
+headers = {'User-Agent': 'curl-shim/1.0'}
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg in ('-X', '--request') and i + 1 < len(args):
+        method = args[i + 1].upper()
+        i += 2
+    elif arg in ('-d', '--data', '--data-raw'):
+        d_tokens = []
+        i += 1
+        while i < len(args) and not args[i].startswith('-') and not (args[i].startswith('http://') or args[i].startswith('https://')):
+            d_tokens.append(args[i])
+            i += 1
+        data = ' '.join(d_tokens).encode('utf-8')
+        if method == 'GET':
+            method = 'POST'
+    elif arg in ('-H', '--header') and i + 1 < len(args):
+        h = args[i + 1]
+        if ':' in h:
+            k, v = h.split(':', 1)
+            headers[k.strip()] = v.strip()
+        i += 2
+    elif arg.startswith('http://') or arg.startswith('https://'):
+        url = arg
+        i += 1
+    else:
+        i += 1
+if not url:
+    for arg in args:
+        if '://' in arg or arg.startswith('localhost'):
+            url = arg if '://' in arg else 'http://' + arg
+            break
+if not url:
+    sys.exit(1)
+try:
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data_out = resp.read().decode('utf-8')
+        print(data_out, end='')
+        sys.exit(0 if resp.status < 400 else 1)
+except Exception as e:
+    sys.exit(1)

@@ -1,0 +1,62 @@
+# Overlay: deploy the stack into the Rancher project `ai-development` on the
+# k3d `rancher-cluster`, reachable on host port 8086.
+#
+#   helm upgrade --install besa-dev . -n ai-platform-dev -f values-dev-8086.yaml
+#
+# Runs fully side by side with the raw-manifest deployment in ai-platform /
+# agent-apps, which keeps its own 8081/8443 edge and is not touched.
+
+namespaces:
+  create: true
+  platform: ai-platform-dev
+  apps: agent-apps-dev
+
+rancher:
+  # Project "ai-development" in the `local` cluster.
+  # Confirm with: kubectl get projects.management.cattle.io -n local
+  projectId: "local:p-frmjf"
+  projectName: "p-frmjf"
+
+apps:
+  webui:
+    service:
+      type: NodePort
+      # host:8086 -> k3d serverlb -> node:30086 -> svc/webui -> webui:8080
+      nodePort: 30086
+
+ingress:
+  enabled: true
+  className: traefik
+  # Distinct hostnames so the existing agent/litellm/langfuse.localhost routes
+  # on the shared Traefik keep pointing at the original stack.
+  hosts:
+    webui: agent-dev.localhost
+    litellm: litellm-dev.localhost
+    langfuse: langfuse-dev.localhost
+  nodePortHostPort: 8086
+
+platform:
+  # The ai-development project applies a per-namespace ResourceQuota
+  # (requests.storage 8Gi, limits.cpu 4, requests.cpu 2, limits.memory 8Gi).
+  # values.yaml keeps the raw manifests' original sizing; these overrides trim
+  # the two axes that would otherwise be rejected:
+  #   requests.storage  15Gi -> 7Gi   (postgres 5->3, milvus 10->4)
+  #   limits.cpu       4500m -> 3500m (milvus 2000m -> 1000m)
+  # Milvus takes the bulk of the cut: it is provisioned and probed, but no agent
+  # code path queries it - MILVUS_URI is only TCP-probed by the init container.
+  postgres:
+    storage:
+      size: 3Gi
+  milvus:
+    storage:
+      size: 4Gi
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: 1000m, memory: 2Gi }
+
+  langfuse:
+    # Browser-facing URL for the new Langfuse, through the shared Traefik edge.
+    nextAuthUrl: "http://langfuse-dev.localhost:8081"
+    # Fill in after creating the project in the NEW Langfuse, then helm upgrade.
+    publicKey: ""
+    secretKey: ""

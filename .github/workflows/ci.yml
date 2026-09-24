@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    name: Chart and manifests
+    runs-on: ubuntu-latest
+    env:
+      CHART: helm/besa-agent-platform
+      KUBERNETES_VERSION: "1.30.0"
+      KUBECONFORM_VERSION: v0.6.7
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Install kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Lint
+        run: |
+          helm lint "$CHART"
+          helm lint "$CHART" -f "$CHART/values-dev-8086.yaml"
+
+      - name: Render
+        run: |
+          mkdir -p rendered
+          helm template ci "$CHART" > rendered/default.yaml
+          helm template ci "$CHART" -f "$CHART/values-dev-8086.yaml" > rendered/dev-8086.yaml
+
+      # Strict: unknown fields and repeated keys fail, so a template can't drift into
+      # YAML that only a lenient parser accepts.
+      - name: Validate against Kubernetes schemas
+        run: |
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" rendered/
+          kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" k8s/
+
+      - name: No fixed credentials
+        run: |
+          pattern='sk-admin|postgrespassword|langfuse-secret-32-chars|langfuse-salt-token|0123456789abcdef0123456789abcdef|pk-lf-[0-9a-f]{8}-|sk-lf-[0-9a-f]{8}-'
+          if grep -nE "$pattern" rendered/*.yaml; then
+            echo "::error::The rendered chart contains a fixed credential."; exit 1
+          fi
+          # new-dev-secrets.ps1 names sk-admin once, in its migration example.
+          if git grep -nE "$pattern" -- . ':!.github/workflows/ci.yml' ':!scripts/new-dev-secrets.ps1' ':!scripts/tests/'; then
+            echo "::error::A fixed credential is committed."; exit 1
+          fi
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pyyaml
+
+      - name: Compile the Python services
+        run: |
+          python -m py_compile helm/besa-agent-platform/files/*/*.py
+          python -c "import ast; ast.parse(open('helm/besa-agent-platform/files/shared/curl').read())"
+
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $failed = 0
+          Get-ChildItem scripts -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($e in $errors) {
+              Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+              $failed++
+            }
+          }
+          if ($failed) { exit 1 }
+
+      # Chart credentials (needs helm) and new-dev-secrets.ps1 (needs pwsh, preinstalled).
+      - name: Unit tests
+        run: python -m unittest discover -s scripts/tests -v
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

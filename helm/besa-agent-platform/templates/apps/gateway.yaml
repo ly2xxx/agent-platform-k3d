@@ -1,0 +1,113 @@
+{{- if .Values.apps.gateway.enabled }}
+{{- $a := .Values.apps }}
+{{- $c := .Values.apps.gateway }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-policy
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "agent-gateway" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: agent-gateway
+    tier: agent-runtime
+data:
+  # Routing table. gateway.py reads these from the environment, so the gateway
+  # follows the release's own namespaces rather than a hardcoded FQDN.
+  AGENT2_URL: {{ include "besa.agent2Url" . | quote }}
+  MCP_SERVER_URL: {{ include "besa.mcpUrl" . | quote }}
+  LITELLM_BASE_URL: {{ include "besa.litellmUrl" . | quote }}
+  gateway.py: |
+{{ .Files.Get "files/gateway/gateway.py" | indent 4 }}
+  {{- include "besa.curlShim" . | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-gateway
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "agent-gateway" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: agent-gateway
+    tier: agent-runtime
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "agent-gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "agent-gateway" "partOf" "besa-agent-platform" "name" "agent-gateway") | nindent 8 }}
+        tier: agent-runtime
+      annotations:
+        checksum/code: {{ .Files.Get "files/gateway/gateway.py" | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: agent-gateway
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/gateway/curl /usr/local/bin/curl && chmod +x /usr/local/bin/curl
+              python /etc/gateway/gateway.py
+          ports:
+            - containerPort: {{ $c.port }}
+              name: http
+          env:
+            - name: AGENT2_URL
+              valueFrom:
+                configMapKeyRef: { name: gateway-policy, key: AGENT2_URL }
+            - name: MCP_SERVER_URL
+              valueFrom:
+                configMapKeyRef: { name: gateway-policy, key: MCP_SERVER_URL }
+            - name: LITELLM_BASE_URL
+              valueFrom:
+                configMapKeyRef: { name: gateway-policy, key: LITELLM_BASE_URL }
+          volumeMounts:
+            - name: gateway-config-volume
+              mountPath: /etc/gateway
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: gateway-config-volume
+          configMap:
+            name: gateway-policy
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-gateway
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "agent-gateway" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: agent-gateway
+    tier: agent-runtime
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "agent-gateway") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $c.port }}
+      targetPort: {{ $c.port }}
+{{- end }}

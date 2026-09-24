@@ -1,0 +1,115 @@
+{{- include "besa.resolveSecrets" . }}
+{{- if .Values.platform.langfuse.enabled }}
+{{- $lf := .Values.platform.langfuse }}
+{{- $pg := .Values.platform.postgres }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-secret
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "langfuse" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: data-observability
+type: Opaque
+stringData:
+  DATABASE_URL: "{{ include "besa.postgresUrl" . }}/{{ $lf.database }}"
+  NEXTAUTH_SECRET: {{ $lf.nextAuthSecret | quote }}
+  SALT: {{ $lf.salt | quote }}
+  ENCRYPTION_KEY: {{ $lf.encryptionKey | quote }}
+  NEXTAUTH_URL: {{ $lf.nextAuthUrl | quote }}
+  TELEMETRY_ENABLED: {{ $lf.telemetryEnabled | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "langfuse" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: langfuse-web
+    tier: data-observability
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "langfuse-web") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "langfuse" "partOf" "besa-ai-platform" "name" "langfuse-web") | nindent 8 }}
+        tier: data-observability
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      {{- if $pg.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ $pg.image }}
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "besa.postgresHost" . }} -p 5432 -U {{ $pg.username }} -d {{ $lf.database }}; do
+                echo "Waiting for postgres..."
+                sleep 2
+              done
+          resources:
+            {{- toYaml $.Values.initResources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: langfuse-web
+          image: {{ $lf.image }}
+          imagePullPolicy: {{ $lf.imagePullPolicy }}
+          ports:
+            - containerPort: {{ $lf.port }}
+              name: http
+          env:
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          envFrom:
+            - secretRef:
+                name: langfuse-secret
+          {{- if $lf.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: /api/public/health
+              port: {{ $lf.port }}
+            periodSeconds: {{ $lf.startupProbe.periodSeconds }}
+            failureThreshold: {{ $lf.startupProbe.failureThreshold }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: {{ $lf.port }}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/public/health
+              port: {{ $lf.port }}
+            initialDelaySeconds: 40
+            periodSeconds: 15
+          resources:
+            {{- toYaml $lf.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "langfuse" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: langfuse-web
+    tier: data-observability
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "langfuse-web") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $lf.port }}
+      targetPort: {{ $lf.port }}
+{{- end }}

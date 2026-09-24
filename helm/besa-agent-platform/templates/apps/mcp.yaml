@@ -1,0 +1,98 @@
+{{- if .Values.apps.mcp.enabled }}
+{{- $a := .Values.apps }}
+{{- $c := .Values.apps.mcp }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-config
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "mcp-server" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: mcp-server
+    tier: agent-runtime
+data:
+  server.py: |
+{{ .Files.Get "files/mcp/server.py" | indent 4 }}
+  {{- include "besa.curlShim" . | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "mcp-server" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: mcp-server
+    tier: agent-runtime
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "mcp-server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "mcp-server" "partOf" "besa-agent-platform" "name" "mcp-server") | nindent 8 }}
+        tier: agent-runtime
+      annotations:
+        checksum/code: {{ .Files.Get "files/mcp/server.py" | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: mcp-server
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/mcp/curl /usr/local/bin/curl && chmod +x /usr/local/bin/curl
+              python /etc/mcp/server.py
+          ports:
+            - containerPort: {{ $c.port }}
+              name: http
+          volumeMounts:
+            - name: mcp-config-volume
+              mountPath: /etc/mcp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: mcp-config-volume
+          configMap:
+            name: mcp-config
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "mcp-server" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: mcp-server
+    tier: agent-runtime
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "mcp-server") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $c.port }}
+      targetPort: {{ $c.port }}
+{{- end }}

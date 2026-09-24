@@ -1,0 +1,230 @@
+# Default values for besa-agent-platform.
+# The ai-development / port-8086 deployment overrides these in values-dev-8086.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Pin every workload to the k3d worker node (control-plane DoesNotExist), per DESIGN.md.
+workerOnly: true
+
+# Every workload here is a singleton. Under a namespace ResourceQuota that is
+# sized for exactly one copy of the stack - which is what a Rancher project
+# applies by default - RollingUpdate cannot admit its surge replica and the
+# rollout stalls on "exceeded quota". Recreate trades a few seconds of downtime
+# for upgrades that actually complete. Use RollingUpdate if the quota has room.
+deploymentStrategy: Recreate
+
+# Applied to every initContainer. Namespaces governed by a ResourceQuota on
+# requests/limits reject any container that omits them, and initContainers are
+# no exception - the raw manifests leave these unset, which is fine only in an
+# unquotaed namespace. Rancher projects apply a per-namespace quota by default.
+initResources:
+  requests: { cpu: 25m, memory: 32Mi }
+  limits: { cpu: 100m, memory: 128Mi }
+
+namespaces:
+  # Let the chart own its namespaces. Install WITHOUT --create-namespace so the
+  # templated Namespace objects carry Helm ownership metadata and the Rancher
+  # project annotation. Set to false to install into pre-existing namespaces.
+  create: true
+  platform: ai-platform-dev
+  apps: agent-apps-dev
+
+rancher:
+  # Joins both namespaces to a Rancher project. `projectId` is "<cluster>:<project>",
+  # `projectName` is just the project segment. Leave both empty to skip.
+  projectId: ""
+  projectName: ""
+
+# ---------------------------------------------------------------------------
+# Platform tier -> namespaces.platform
+# ---------------------------------------------------------------------------
+platform:
+  postgres:
+    enabled: true
+    image: postgres:16-alpine
+    imagePullPolicy: IfNotPresent
+    database: langfuse
+    username: postgres
+    # Leave empty to generate (see Credentials in README.md).
+    password: ""
+    # Databases created by initdb alongside `database`. The LiteLLM DATABASE_URL
+    # points at a `litellm` database that POSTGRES_DB alone never creates; on a
+    # fresh volume the initdb hook fixes that. Set to [] for strict parity with
+    # the raw manifests in k8s/platform/10-postgres.yaml.
+    extraDatabases:
+      - litellm
+    storage:
+      size: 5Gi
+      storageClass: local-path
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: 500m, memory: 1Gi }
+
+  milvus:
+    enabled: true
+    image: milvusdb/milvus:v2.4.13
+    imagePullPolicy: IfNotPresent
+    port: 19530
+    metricsPort: 9091
+    storage:
+      size: 10Gi
+      storageClass: local-path
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { cpu: 2000m, memory: 2Gi }
+
+  litellm:
+    enabled: true
+    image: ghcr.io/berriai/litellm:main-latest
+    imagePullPolicy: IfNotPresent
+    port: 4000
+    # Leave empty to generate (see Credentials in README.md).
+    # A value you set must start with sk-, which LiteLLM requires of master keys.
+    masterKey: ""
+    uiUsername: admin
+    uiPassword: ""
+    storeModelInDb: "True"
+    database: litellm
+    # Upstream Ollama on the Windows host. k3d reaches it via host.docker.internal.
+    ollamaBaseUrl: http://host.docker.internal:11434
+    models:
+      - name: "deepseek-v4-flash:cloud"
+        model: "ollama/deepseek-v4-flash:cloud"
+      - name: "qwen3.5:cloud"
+        model: "ollama/qwen3.5:cloud"
+      - name: "default-model"
+        model: "ollama/deepseek-v4-flash:cloud"
+    settings:
+      dropParams: true
+      telemetry: false
+    # With STORE_MODEL_IN_DB and a DATABASE_URL that actually resolves, LiteLLM
+    # runs Prisma migrations on first boot. That takes far longer than the
+    # liveness probe's delay, and the pod gets SIGKILLed mid-migration (exit 137)
+    # in a loop. A startupProbe holds liveness off until boot completes.
+    startupProbe:
+      enabled: true
+      periodSeconds: 5
+      failureThreshold: 72   # 6 minutes of grace
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { cpu: 1000m, memory: 1Gi }
+
+  langfuse:
+    enabled: true
+    image: ghcr.io/langfuse/langfuse:2
+    imagePullPolicy: IfNotPresent
+    port: 3000
+    database: langfuse
+    # Leave empty to generate (see Credentials in README.md).
+    # encryptionKey must be 64 hex characters. Changing salt or encryptionKey on a
+    # live install makes Langfuse's existing data unreadable, so the chart keeps them.
+    nextAuthSecret: ""
+    salt: ""
+    encryptionKey: ""
+    nextAuthUrl: "http://localhost:3000"
+    telemetryEnabled: "false"
+    # A fresh Langfuse has a fresh database, so it issues NEW project keys.
+    # While these are empty the LiteLLM -> Langfuse callback is not configured at
+    # all, so LiteLLM starts clean instead of erroring on every completion.
+    # Fill them in after creating the project in the new Langfuse UI, then
+    # `helm upgrade`. See README section "Wire LiteLLM to Langfuse".
+    publicKey: ""
+    secretKey: ""
+    # Langfuse also migrates its schema on first boot.
+    startupProbe:
+      enabled: true
+      periodSeconds: 5
+      failureThreshold: 72
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { cpu: 1000m, memory: 1536Mi }
+
+# ---------------------------------------------------------------------------
+# Agent tier -> namespaces.apps
+# ---------------------------------------------------------------------------
+apps:
+  # Stock python:3.11-slim running stdlib HTTP servers injected from ConfigMaps.
+  # There is no application image to build.
+  image: python:3.11-slim
+  imagePullPolicy: IfNotPresent
+
+  mcp:
+    enabled: true
+    port: 8000
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+  sandbox:
+    enabled: true
+    port: 9222
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+  gateway:
+    enabled: true
+    port: 8000
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+  agents:
+    enabled: true
+    port: 8080
+    model: "deepseek-v4-flash:cloud"
+    # Blocks agent startup on LiteLLM readiness + a Milvus TCP connect.
+    waitForPlatform: true
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+
+  webui:
+    enabled: true
+    port: 8080
+    # `frontend` matches the raw manifests, which means allow-agents-to-platform
+    # (podSelector tier=agent-runtime) does NOT select the webui pod and it has no
+    # egress restriction. Set to `agent-runtime` to bring it under the policy.
+    tier: frontend
+    waitForAgent: true
+    service:
+      # NodePort is what carries the external host port; see ingress.nodePortHostPort.
+      type: NodePort
+      nodePort: 30086
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { cpu: 250m, memory: 256Mi }
+
+# ---------------------------------------------------------------------------
+# Edge
+# ---------------------------------------------------------------------------
+ingress:
+  # Host-based routes through the SHARED Traefik on the existing 8081/8443 edge.
+  # Hostnames must not collide with any other release on this cluster.
+  enabled: true
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+  # TLS with hosts but no secretName -> Traefik's default self-signed cert (curl -k).
+  tls: true
+  hosts:
+    webui: agent-dev.localhost
+    litellm: litellm-dev.localhost
+    langfuse: langfuse-dev.localhost
+  # Documentation only - printed in NOTES.txt. The host->nodePort mapping is made
+  # once with `k3d cluster edit`, it is not something Helm can create.
+  nodePortHostPort: 8086
+  traefikHttpPort: 8081
+  traefikHttpsPort: 8443
+
+networkPolicies:
+  # isolate-data-tier: only langfuse-web and litellm may reach postgres:5432
+  # allow-agents-to-platform: tier=agent-runtime egress limited to DNS, intra-namespace,
+  # and the platform namespace on 4000/19530/3000.
+  enabled: true
+
+tests:
+  # `helm test` pod running the DESIGN.md section 4 healthz probes.
+  enabled: true
+  image: python:3.11-slim

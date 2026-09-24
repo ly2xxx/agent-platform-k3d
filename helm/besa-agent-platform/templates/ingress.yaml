@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+{{- $ctx := . }}
+{{- $ing := .Values.ingress }}
+{{- /* Host-based routes through the SHARED Traefik on the existing edge ports.
+       The webui additionally gets its own NodePort - see apps/webui.yaml. */}}
+{{- $routes := list }}
+{{- if and .Values.apps.webui.enabled $ing.hosts.webui }}
+{{- $routes = append $routes (dict "name" "agent-webui-ingress" "host" $ing.hosts.webui "ns" (include "besa.appsNs" .) "svc" "webui" "port" .Values.apps.webui.port "app" "webui" "partOf" "besa-agent-platform") }}
+{{- end }}
+{{- if and .Values.platform.litellm.enabled $ing.hosts.litellm }}
+{{- $routes = append $routes (dict "name" "litellm-ingress" "host" $ing.hosts.litellm "ns" (include "besa.platformNs" .) "svc" "litellm" "port" .Values.platform.litellm.port "app" "litellm" "partOf" "besa-ai-platform") }}
+{{- end }}
+{{- if and .Values.platform.langfuse.enabled $ing.hosts.langfuse }}
+{{- $routes = append $routes (dict "name" "langfuse-ingress" "host" $ing.hosts.langfuse "ns" (include "besa.platformNs" .) "svc" "langfuse-web" "port" .Values.platform.langfuse.port "app" "langfuse-web" "partOf" "besa-ai-platform") }}
+{{- end }}
+{{- range $r := $routes }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $r.name }}
+  namespace: {{ $r.ns }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" $ctx "component" $r.app "partOf" $r.partOf) | nindent 4 }}
+    app: {{ $r.app }}
+    tier: ingress
+  {{- with $ing.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ing.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ $r.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $r.svc }}
+                port:
+                  number: {{ $r.port }}
+  {{- if $ing.tls }}
+  tls:
+    # No secretName - falls through to Traefik's default self-signed cert.
+    - hosts:
+        - {{ $r.host | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

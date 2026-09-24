@@ -1,0 +1,99 @@
+# langfuse-secret (NEXTAUTH_SECRET, SALT, ENCRYPTION_KEY) is created by
+# scripts/new-dev-secrets.ps1. Credentials are not in this repo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: ai-platform
+  labels:
+    app: langfuse-web
+    app.kubernetes.io/part-of: besa-ai-platform
+    tier: data-observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: langfuse-web
+  template:
+    metadata:
+      labels:
+        app: langfuse-web
+        app.kubernetes.io/part-of: besa-ai-platform
+        tier: data-observability
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h postgres.ai-platform.svc.cluster.local -p 5432 -U postgres -d langfuse; do
+                echo "Waiting for postgres..."
+                sleep 2
+              done
+      containers:
+        - name: langfuse-web
+          image: ghcr.io/langfuse/langfuse:2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: NEXTAUTH_URL
+              value: "http://localhost:3000"
+            - name: TELEMETRY_ENABLED
+              value: "false"
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: POSTGRES_PASSWORD } }
+            - name: DATABASE_URL   # $(POSTGRES_PASSWORD) is expanded by Kubernetes from the line above
+              value: "postgresql://postgres:$(POSTGRES_PASSWORD)@postgres.ai-platform.svc.cluster.local:5432/langfuse"
+          envFrom:
+            - secretRef:
+                name: langfuse-secret
+          readinessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/public/health
+              port: 3000
+            initialDelaySeconds: 40
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1.5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: ai-platform
+  labels:
+    app: langfuse-web
+    app.kubernetes.io/part-of: besa-ai-platform
+    tier: data-observability
+spec:
+  type: ClusterIP
+  selector:
+    app: langfuse-web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000

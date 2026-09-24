@@ -1,0 +1,156 @@
+{{- include "besa.resolveSecrets" . }}
+{{- if .Values.apps.agents.enabled }}
+{{- $a := .Values.apps }}
+{{- $c := .Values.apps.agents }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "agents" "partOf" "besa-agent-platform") | nindent 4 }}
+    tier: agent-runtime
+data:
+  # Consumed via envFrom. Every endpoint derives from the release's own
+  # namespaces, so the agents can never reach into another release's platform.
+  LITELLM_BASE_URL: {{ include "besa.litellmUrl" . | quote }}
+  LITELLM_MODEL: {{ $c.model | quote }}
+  MILVUS_URI: {{ include "besa.milvusUri" . | quote }}
+  LANGFUSE_HOST: {{ include "besa.langfuseUrl" . | quote }}
+  AGENT_GATEWAY_URL: {{ include "besa.gatewayUrl" . | quote }}
+  MCP_SERVER_URL: {{ include "besa.mcpUrl" . | quote }}
+  BROWSER_WS_ENDPOINT: {{ include "besa.browserWs" . | quote }}
+  agent1_server.py: |
+{{ .Files.Get "files/agents/agent1_server.py" | indent 4 }}
+  agent2_server.py: |
+{{ .Files.Get "files/agents/agent2_server.py" | indent 4 }}
+  wait_for_platform.py: |
+{{ .Files.Get "files/agents/wait_for_platform.py" | indent 4 }}
+  {{- include "besa.curlShim" . | nindent 2 }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agent-secret
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "agents" "partOf" "besa-agent-platform") | nindent 4 }}
+    tier: agent-runtime
+type: Opaque
+stringData:
+  # A Secret, not the agent-config ConfigMap: ConfigMaps are readable by anyone who
+  # can read config in the namespace, and are shown in plain text by most tooling.
+  LITELLM_API_KEY: {{ .Values.platform.litellm.masterKey | quote }}
+{{- $agents := list
+      (dict "name" "agent-1" "container" "customer-agent" "script" "agent1_server.py" "role" "customer")
+      (dict "name" "agent-2" "container" "specialist-agent" "script" "agent2_server.py" "role" "specialist")
+}}
+{{- range $agent := $agents }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $agent.name }}
+  namespace: {{ include "besa.appsNs" $ }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" $ "component" $agent.name "partOf" "besa-agent-platform") | nindent 4 }}
+    app: {{ $agent.name }}
+    role: agent
+    tier: agent-runtime
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" $ "name" $agent.name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" $ "component" $agent.name "partOf" "besa-agent-platform" "name" $agent.name) | nindent 8 }}
+        role: agent
+        tier: agent-runtime
+      annotations:
+        checksum/code: {{ $.Files.Get (printf "files/agents/%s" $agent.script) | sha256sum }}
+        checksum/secret: {{ $.Values.platform.litellm.masterKey | sha256sum }}
+    spec:
+      {{- include "besa.affinity" $ | nindent 6 }}
+      {{- if $c.waitForPlatform }}
+      initContainers:
+        - name: wait-for-platform
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command: ["python", "/etc/agent/wait_for_platform.py"]
+          envFrom:
+            - configMapRef:
+                name: agent-config
+            - secretRef:
+                name: agent-secret
+          volumeMounts:
+            - name: agent-config-volume
+              mountPath: /etc/agent
+          resources:
+            {{- toYaml $.Values.initResources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: {{ $agent.container }}
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/agent/curl /usr/local/bin/curl && chmod +x /usr/local/bin/curl
+              python /etc/agent/{{ $agent.script }}
+          ports:
+            - containerPort: {{ $c.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: agent-config
+            - secretRef:
+                name: agent-secret
+          volumeMounts:
+            - name: agent-config-volume
+              mountPath: /etc/agent
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: agent-config-volume
+          configMap:
+            name: agent-config
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $agent.name }}
+  namespace: {{ include "besa.appsNs" $ }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" $ "component" $agent.name "partOf" "besa-agent-platform") | nindent 4 }}
+    app: {{ $agent.name }}
+    tier: agent-runtime
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" $ "name" $agent.name) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $c.port }}
+      targetPort: {{ $c.port }}
+{{- end }}
+{{- end }}
