@@ -1,0 +1,66 @@
+{{ .Chart.Name }} {{ .Chart.Version }} installed as release "{{ .Release.Name }}".
+
+  Platform namespace : {{ include "besa.platformNs" . }}
+  Apps namespace     : {{ include "besa.appsNs" . }}
+{{- if .Values.rancher.projectId }}
+  Rancher project    : {{ .Values.rancher.projectId }}
+{{- end }}
+
+Credentials are generated on first install and kept on upgrade. Read one with:
+
+  kubectl get secret litellm-secret -n {{ include "besa.platformNs" . }} -o jsonpath="{.data.UI_PASSWORD}"
+  (base64; the chart README has a PowerShell helper that decodes it)
+
+Wait for everything to settle:
+
+  kubectl rollout status deploy --timeout=5m -n {{ include "besa.platformNs" . }}
+  kubectl rollout status deploy --timeout=5m -n {{ include "besa.appsNs" . }}
+
+{{ if and .Values.apps.webui.enabled (eq .Values.apps.webui.service.type "NodePort") -}}
+EXTERNAL ACCESS (port {{ .Values.ingress.nodePortHostPort }})
+
+  The webui Service is NodePort {{ .Values.apps.webui.service.nodePort }}. Helm cannot publish a host
+  port - k3d must map it once, which recreates the serverlb container (brief
+  blip on the Rancher UI and the kubectl API port):
+
+    k3d cluster edit <cluster> --port-add "{{ .Values.ingress.nodePortHostPort }}:{{ .Values.apps.webui.service.nodePort }}@loadbalancer"
+    docker port k3d-<cluster>-serverlb
+
+  Then:
+
+    curl.exe -s http://localhost:{{ .Values.ingress.nodePortHostPort }}/healthz
+    start http://localhost:{{ .Values.ingress.nodePortHostPort }}
+
+{{ end -}}
+{{- if .Values.ingress.enabled }}
+INGRESS (through the shared Traefik on :{{ .Values.ingress.traefikHttpPort }} / :{{ .Values.ingress.traefikHttpsPort }})
+{{ if .Values.apps.webui.enabled }}
+  WebUI    http://{{ .Values.ingress.hosts.webui }}:{{ .Values.ingress.traefikHttpPort }}
+{{- end }}
+{{- if .Values.platform.litellm.enabled }}
+  LiteLLM  http://{{ .Values.ingress.hosts.litellm }}:{{ .Values.ingress.traefikHttpPort }}
+{{- end }}
+{{- if .Values.platform.langfuse.enabled }}
+  Langfuse http://{{ .Values.ingress.hosts.langfuse }}:{{ .Values.ingress.traefikHttpPort }}
+{{- end }}
+{{- end }}
+
+{{ if and .Values.platform.litellm.enabled (not (and .Values.platform.langfuse.publicKey .Values.platform.langfuse.secretKey)) -}}
+TRACING IS OFF
+
+  This Langfuse has a fresh database, so it has not issued project keys yet and
+  LiteLLM was rendered without the langfuse callback. To turn tracing on:
+
+    1. Open http://{{ .Values.ingress.hosts.langfuse }}:{{ .Values.ingress.traefikHttpPort }} and create an organization + project.
+    2. Copy the public and secret keys, then:
+
+       helm upgrade {{ .Release.Name }} . -n {{ .Release.Namespace }} -f values-dev-8086.yaml \
+         --set platform.langfuse.publicKey=pk-lf-... \
+         --set platform.langfuse.secretKey=sk-lf-...
+
+{{ end -}}
+{{- if .Values.tests.enabled }}
+Run the built-in health probes:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --logs
+{{- end }}

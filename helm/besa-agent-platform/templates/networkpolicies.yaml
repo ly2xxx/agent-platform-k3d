@@ -1,0 +1,71 @@
+{{- if .Values.networkPolicies.enabled }}
+{{- if .Values.platform.postgres.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: isolate-data-tier
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "netpol" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: security-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only Langfuse Web and LiteLLM may reach Postgres on 5432.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: langfuse-web
+        - podSelector:
+            matchLabels:
+              app: litellm
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agents-to-platform
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "netpol" "partOf" "besa-agent-platform") | nindent 4 }}
+    tier: security-policy
+spec:
+  podSelector:
+    matchLabels:
+      tier: agent-runtime
+  policyTypes:
+    - Egress
+  egress:
+    # 1. Intra-namespace traffic (agents, gateway, MCP, sandbox).
+    - to:
+        - podSelector: {}
+    # 2. DNS resolution against CoreDNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 3. Authorized egress to THIS release's platform namespace only.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "besa.platformNs" . }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.platform.litellm.port }}
+        - protocol: TCP
+          port: {{ .Values.platform.milvus.port }}
+        - protocol: TCP
+          port: {{ .Values.platform.langfuse.port }}
+{{- end }}

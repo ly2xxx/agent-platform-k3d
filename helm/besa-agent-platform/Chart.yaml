@@ -1,0 +1,14 @@
+apiVersion: v2
+name: besa-agent-platform
+description: BeSA AI agent platform (LiteLLM, Milvus, Langfuse, Postgres + agent mesh) for k3d/Rancher
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - besa
+  - agents
+  - litellm
+  - langfuse
+  - milvus
+  - rancher
+  - k3d

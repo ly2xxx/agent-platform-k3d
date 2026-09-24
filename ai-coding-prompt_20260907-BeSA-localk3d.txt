@@ -1,0 +1,156 @@
+What's the one noun this is about — the core entity?
+What's the one rule that actually carries complexity? Name it. Everything else is CRUD around it.
+What gets persisted, versus what's just computed and returned?
+Is there a trigger with a side effect (something fires when a condition is met), or is this pure compute with no side effect?
+What am I explicitly not building in the time I have? Say the cut out loud before you paste, not after someone asks.
+
+Alright let's do this my spec-driven way: adapt the following blueprint 4-step workflow to this specific task (by re-writing the Step 1 requirement: part)
+
+=================================================================================
+Step 1 — plan only, DESIGN.md, no code
+You are in PLAN-ONLY mode. Do not write manifests, Helm charts, or scripts yet.
+Produce ONLY a single file named DESIGN.md.
+
+DESIGN.md must be a Kubernetes System / Infrastructure Blueprint for the following
+requirement:
+
+- Adapt the distributed BeSA Agent platform ([self-managed-arch-dark.png]) onto a local
+  k3d-Rancher cluster ([DevOps-labs/k3d-rancher/README.md]).
+- Workloads & Boundaries:
+  1. Frontend & Ingress: WebUI (Chainlit) exposed via Traefik Ingress + Rancher TLS
+  2. Agent Core: Agent1 (Customer Agent) and Agent2 (A2A) connected via AgentGateway Proxy
+  3. AI Gateway: LiteLLM proxy pod routing to host-level Ollama (e.g. deepseek-v4-flash:cloud)
+  4. Vector & Memory: Milvus standalone (StatefulSet / Helm, Etcd, MinIO, PVC on local-path)
+  5. Observability: Langfuse (Deployment, Web, Postgres PVC) with telemetry from LiteLLM/Agent
+  6. Tools & Sandbox: MCP Tool Server pod + Headless Browser pod
+- Support local developer scale with resource reservations suited for Docker Desktop / k3d.
+
+Constraints:
+- Cloud-native abstraction at the centre: Declarative K8s manifests / Helm values only.
+- Strict namespace isolation: e.g., `ai-platform` (LiteLLM, Milvus, Langfuse), `agent-apps` (WebUI, Agents, Gateway, MCP).
+- All inter-pod networking uses Kubernetes DNS (`<svc>.<namespace>.svc.cluster.local`).
+- Outbound LLM calls to host Ollama route deterministically via `host.k3d.internal:11434`.
+- Persistent storage must map to k3d's built-in `local-path` StorageClass.
+- Explicit NetworkPolicies: Isolate backend data tiers (Milvus, Postgres) to only authorized agent/gateway pods.
+- Strictly keep DESIGN.md UNDER 100 LINES total.
+- Structure DESIGN.md into EXACTLY 4 sections:
+  1. Cluster Topology, Namespaces & Helm/Manifest Directory Layout
+  2. Workload & Service Dependency Graph (WebUI -> Agents -> Gateway -> MCP / Milvus / LiteLLM / Langfuse)
+  3. ConfigMaps, Secrets, PVC Storage & Ingress/Traefik Routing Matrix
+  4. Health Checks, Readiness Gates & Dependency Validation Strategy
+
+=================================================================================
+
+Step 2 — still plan only, phase breakdown + DoD
+Continue in PLAN-ONLY mode. No manifests or code yet. Update DESIGN.md only.
+
+Break deployment into four ordered phases:
+- Phase 1: Shared Platform Infra (Namespaces, Secrets/ConfigMaps, local-path PVCs, LiteLLM AI Gateway -> Ollama).
+- Phase 2: State & Observability Tier (Milvus standalone + Langfuse + Postgres deployment).
+- Phase 3: Agent & Tooling Tier (MCP server, Headless Browser, AgentGateway Proxy, Agent pods).
+- Phase 4: Ingress, WebUI & End-to-End Dependency Validation (Traefik Ingress routing, Chainlit UI, Readiness DoD).
+
+For each phase:
+- Name the target manifest files / Helm values files.
+- Name the exact readiness probes and synthetic curl/kubectl checks forming its Definition of Done.
+- Define a 100% pass threshold for all dependent service health checks.
+
+=================================================================================
+
+Step 3 — strictly coding, one phase at a time
+Switch to STRICT CODING mode. Do not run deployments or scripts yet. Write manifests,
+Dockerfiles, Helm values, and test scripts only, then stop. I will execute and verify on Rancher.
+
+Prerequisite Setup (Phase 1 only):
+- Verify k3d cluster and Rancher status from [DevOps-labs/k3d-rancher/README.md].
+- Create directory structure under `k8s/` or designated infra directory.
+
+Create an empty PHASED.md if one doesn't already exist.
+
+Work through the phases from DESIGN.md one at a time, in order:
+1. Implement only that phase's target manifests and configuration files.
+2. Provide synthetic validation scripts (e.g. `verify-phaseN.sh` or `kubectl exec` curl commands).
+3. Append an entry to PHASED.md containing:
+   - Status & Target manifests created/modified.
+   - Summary of deployed infrastructure/workload components.
+   - The EXACT, copy-pasteable terminal deployment & verification commands (e.g. `kubectl apply -f ... && kubectl wait ...`).
+4. Stop. Wait for my review, cluster verification, and APPROVE before starting the next phase.
+
+Begin with Phase 1.
+
+=================================================================================
+
+Step 4 — quality gate
+Create a reusable skill named k8s-platform-quality-gate in the standard procedures location.
+The skill should:
+
+- Run declarative static linting: `kubeconform` or `helm lint` on all manifests.
+- Validate live cluster state via kubectl:
+  `kubectl get pods -A -l app.kubernetes.io/part-of=ai-agents --no-headers`
+- Check PVC bindings, Ingress HTTP 200/OK status, and Langfuse/LiteLLM endpoint response.
+- Write PLATFORM_QUALITY_REPORT.md at the repo root containing: cluster health verdict,
+  pod status matrix, PVC status, and ingress routing test results.
+- Only if all pods are `Running`/`Ready` and ingress routes return 200, append
+  "Quality Gate: PASSED" to PHASED.md. Approval remains a separate human-authored entry.
+
+Run the skill now and show me the report.
+
+
+Step 2 — still plan only, phase breakdown + DoD
+Continue in PLAN-ONLY mode. Still no Python code, no .py files. Update
+DESIGN.md only.
+
+Break the implementation into no more than four phases:
+1. Domain Core (Entities, Value Objects, Session state machine, Budget/Token arithmetic)
+2. Boundary Ports & Adapters (LiteLLM/Ollama client, Langfuse tracer port, Milvus port, MCP client)
+3. Persistence & Entrypoints (SQLAlchemy session repo, FastAPI REST/SSE streaming endpoints)
+4. Containerization & Rancher Manifests (Dockerfile, K8s Deployment, Service, ConfigMap/Secrets)
+
+For each phase:
+- Name the target files.
+- Name the unit tests that form its Definition of Done.
+- State a coverage target of at least 75% of core business logic for that phase.
+  Sacrifice cosmetic tests before ever sacrificing a core logic test.
+
+List the four phases in the order they'll be implemented.
+
+=================================================================================
+
+Step 3 — strictly coding, one phase at a time
+Switch to STRICT CODING mode. Do not run any tests. Do not execute pytest,
+uv run pytest, or any other test runner. Write code and test files only,
+then stop. I will run the tests myself.
+
+Prerequisite Setup (Phase 1 only):
+- If `pyproject.toml` does not exist or lacks dev dependencies, create/update `pyproject.toml` using `uv` standards.
+- Include required dependencies: `pydantic`, `sqlalchemy`, `pytest`, `pytest-cov`, `ruff`, `fastapi`, `httpx`.
+
+Create an empty PHASED.md if one doesn't already exist.
+
+Work through the phases from DESIGN.md one at a time, in order. For each phase:
+1. Implement only that phase's target files.
+2. Write the test files for that phase.
+3. Append an entry to PHASED.md containing:
+   - Status & Target files created/modified.
+   - Summary of implemented business logic.
+   - The EXACT, copy-pasteable terminal verification command (e.g. `uv run pytest tests/domain/ -v`).
+4. Stop. Wait for my review, my test run, and my APPROVE before starting the next phase.
+
+Begin with Phase 1.
+
+=================================================================================
+
+Step 4 — quality gate
+Create a reusable skill named python-quality-gate in this tool's standard
+location for reusable procedures. The skill should:
+
+- Run scoped linting via uv targeting strictly critical errors:
+  `uv run ruff check . --select E9,F821`
+- Run tests via uv:
+  `uv run pytest tests/ -v --cov=src --cov-report=term-missing`
+- Write QUALITY_REPORT.md at the repo root containing: verdict, lint summary,
+  test pass/fail counts, and coverage percentage.
+- Only if both checks are clean, append a "Quality Gate: PASSED" line to PHASED.md.
+  Never write or imply human approval in that line — approval stays a separate, human-authored entry in PHASED.md.
+
+Run the skill now and show me the report.

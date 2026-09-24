@@ -1,0 +1,35 @@
+{{- if .Values.platform.postgres.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-postgres
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: data-observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.platform.postgres.storage.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.platform.postgres.storage.size }}
+{{- end }}
+{{- if .Values.platform.milvus.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-milvus-data
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "milvus" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: data-observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.platform.milvus.storage.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.platform.milvus.storage.size }}
+{{- end }}

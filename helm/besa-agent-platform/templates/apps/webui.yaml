@@ -1,0 +1,153 @@
+{{- if .Values.apps.webui.enabled }}
+{{- $a := .Values.apps }}
+{{- $c := .Values.apps.webui }}
+# Split into two ConfigMaps on purpose: the raw manifest used one for both
+# envFrom and the volume, which injected server.py and the curl shim into the
+# pod environment as multi-line env vars.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webui-env
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "webui" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: webui
+    tier: {{ $c.tier }}
+data:
+  AGENT_ENDPOINT: {{ include "besa.agent1Url" . | quote }}
+  LANGFUSE_HOST: {{ include "besa.langfuseUrl" . | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webui-code
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "webui" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: webui
+    tier: {{ $c.tier }}
+data:
+  server.py: |
+{{ .Files.Get "files/webui/server.py" | indent 4 }}
+  {{- include "besa.curlShim" . | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webui
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "webui" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: webui
+    tier: {{ $c.tier }}
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "webui") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "webui" "partOf" "besa-agent-platform" "name" "webui") | nindent 8 }}
+        tier: {{ $c.tier }}
+      annotations:
+        checksum/code: {{ .Files.Get "files/webui/server.py" | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      {{- if and $c.waitForAgent .Values.apps.agents.enabled }}
+      initContainers:
+        - name: wait-for-agent
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          env:
+            - name: AGENT_ENDPOINT
+              valueFrom:
+                configMapKeyRef: { name: webui-env, key: AGENT_ENDPOINT }
+          command:
+            - python
+            - -c
+            - |
+              import os, time, urllib.request
+              url = os.environ["AGENT_ENDPOINT"] + "/healthz"
+              while True:
+                  try:
+                      with urllib.request.urlopen(url, timeout=3) as r:
+                          if r.status == 200:
+                              print("Agent-1 is Ready.")
+                              break
+                  except Exception as e:
+                      print(f"Agent-1 not ready yet ({e}), waiting 2s...")
+                      time.sleep(2)
+          resources:
+            {{- toYaml $.Values.initResources | nindent 12 }}
+      {{- end }}
+      containers:
+        - name: webui
+          image: {{ $a.image }}
+          imagePullPolicy: {{ $a.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              cp /etc/webui/curl /usr/local/bin/curl && chmod +x /usr/local/bin/curl
+              python /etc/webui/server.py
+          ports:
+            - containerPort: {{ $c.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: webui-env
+          volumeMounts:
+            - name: webui-code-volume
+              mountPath: /etc/webui
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $c.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+      volumes:
+        - name: webui-code-volume
+          configMap:
+            name: webui-code
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webui
+  namespace: {{ include "besa.appsNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "webui" "partOf" "besa-agent-platform") | nindent 4 }}
+    app: webui
+    tier: {{ $c.tier }}
+  {{- if eq $c.service.type "NodePort" }}
+  annotations:
+    # Reachable on the host only once k3d publishes it:
+    #   k3d cluster edit <cluster> --port-add "{{ .Values.ingress.nodePortHostPort }}:{{ $c.service.nodePort }}@loadbalancer"
+    besa.local/external-url: "http://localhost:{{ .Values.ingress.nodePortHostPort }}"
+  {{- end }}
+spec:
+  type: {{ $c.service.type }}
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "webui") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $c.port }}
+      targetPort: {{ $c.port }}
+      {{- if and (eq $c.service.type "NodePort") $c.service.nodePort }}
+      nodePort: {{ $c.service.nodePort }}
+      {{- end }}
+{{- end }}

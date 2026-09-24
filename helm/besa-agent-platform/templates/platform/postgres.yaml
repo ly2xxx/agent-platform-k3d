@@ -1,0 +1,117 @@
+{{- include "besa.resolveSecrets" . }}
+{{- if .Values.platform.postgres.enabled }}
+{{- $pg := .Values.platform.postgres }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: data-observability
+type: Opaque
+stringData:
+  POSTGRES_DB: {{ $pg.database | quote }}
+  POSTGRES_USER: {{ $pg.username | quote }}
+  POSTGRES_PASSWORD: {{ $pg.password | quote }}
+{{- if $pg.extraDatabases }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform") | nindent 4 }}
+    tier: data-observability
+data:
+  # Runs once, during initdb on an empty volume. POSTGRES_DB only creates
+  # `{{ $pg.database }}`; LiteLLM's DATABASE_URL needs its own database to exist.
+  00-extra-databases.sql: |
+    {{- range $pg.extraDatabases }}
+    CREATE DATABASE {{ . }};
+    {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: postgres
+    tier: data-observability
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "postgres") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform" "name" "postgres") | nindent 8 }}
+        tier: data-observability
+      annotations:
+        checksum/secret: {{ printf "%s|%s|%s" $pg.database $pg.username $pg.password | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: postgres
+          image: {{ $pg.image }}
+          imagePullPolicy: {{ $pg.imagePullPolicy }}
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            {{- if $pg.extraDatabases }}
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+            {{- end }}
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $pg.username | quote }}, "-d", {{ $pg.database | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ $pg.username | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: pvc-postgres
+        {{- if $pg.extraDatabases }}
+        - name: postgres-init
+          configMap:
+            name: postgres-init
+            defaultMode: 0755
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "postgres" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: postgres
+    tier: data-observability
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "postgres") | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+{{- end }}

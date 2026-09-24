@@ -1,0 +1,142 @@
+{{- include "besa.resolveSecrets" . }}
+{{- if .Values.platform.litellm.enabled }}
+{{- $l := .Values.platform.litellm }}
+{{- $lf := .Values.platform.langfuse }}
+{{- $tracing := and $lf.publicKey $lf.secretKey }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "litellm" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: litellm
+data:
+  config.yaml: |
+    model_list:
+      {{- range $l.models }}
+      - model_name: {{ .name | quote }}
+        litellm_params:
+          model: {{ .model | quote }}
+          api_base: {{ default $l.ollamaBaseUrl .apiBase | quote }}
+      {{- end }}
+    litellm_settings:
+      drop_params: {{ $l.settings.dropParams }}
+      telemetry: {{ $l.settings.telemetry }}
+      {{- if $tracing }}
+      success_callback: ["langfuse"]
+      failure_callback: ["langfuse"]
+      {{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secret
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "litellm" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: litellm
+type: Opaque
+stringData:
+  LITELLM_MASTER_KEY: {{ $l.masterKey | quote }}
+  UI_USERNAME: {{ $l.uiUsername | quote }}
+  UI_PASSWORD: {{ $l.uiPassword | quote }}
+  DATABASE_URL: "{{ include "besa.postgresUrl" . }}/{{ $l.database }}"
+  {{- if $tracing }}
+  LANGFUSE_PUBLIC_KEY: {{ $lf.publicKey | quote }}
+  LANGFUSE_SECRET_KEY: {{ $lf.secretKey | quote }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "litellm" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: litellm
+spec:
+  replicas: 1
+  {{- if $.Values.deploymentStrategy }}
+  strategy:
+    type: {{ $.Values.deploymentStrategy }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "besa.selectorLabels" (dict "ctx" . "name" "litellm") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "besa.podLabels" (dict "ctx" . "component" "litellm" "partOf" "besa-ai-platform" "name" "litellm") | nindent 8 }}
+      annotations:
+        # Restart LiteLLM when the model list or the Langfuse keys change.
+        checksum/config: {{ toYaml $l.models | sha256sum }}
+        checksum/tracing: {{ printf "%v|%s" $tracing $lf.publicKey | sha256sum }}
+    spec:
+      {{- include "besa.affinity" . | nindent 6 }}
+      containers:
+        - name: litellm
+          image: {{ $l.image }}
+          imagePullPolicy: {{ $l.imagePullPolicy }}
+          args: ["--config", "/etc/litellm/config.yaml", "--port", "{{ $l.port }}"]
+          ports:
+            - containerPort: {{ $l.port }}
+              name: http
+          envFrom:
+            - secretRef:
+                name: litellm-secret
+          env:
+            - name: STORE_MODEL_IN_DB
+              value: {{ $l.storeModelInDb | quote }}
+            {{- if $tracing }}
+            - name: LANGFUSE_HOST
+              value: {{ include "besa.langfuseUrl" . | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/litellm/config.yaml
+              subPath: config.yaml
+          {{- if $l.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: /health/readiness
+              port: {{ $l.port }}
+            periodSeconds: {{ $l.startupProbe.periodSeconds }}
+            failureThreshold: {{ $l.startupProbe.failureThreshold }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: {{ $l.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/readiness
+              port: {{ $l.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml $l.resources | nindent 12 }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: {{ include "besa.platformNs" . }}
+  labels:
+    {{- include "besa.labels" (dict "ctx" . "component" "litellm" "partOf" "besa-ai-platform") | nindent 4 }}
+    app: litellm
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "besa.selectorLabels" (dict "ctx" . "name" "litellm") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $l.port }}
+      targetPort: {{ $l.port }}
+{{- end }}
