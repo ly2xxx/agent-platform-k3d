@@ -60,9 +60,10 @@ jobs:
       builder: ${{ inputs.builder }}
       model: ${{ vars.OLLAMA_MODEL || 'deepseek-v4-flash:cloud' }}
       think: ${{ vars.OLLAMA_THINK || '' }}
-      # requirements.txt only exists once a feature adds one. PyYAML is for the
-      # existing scripts/tests, which pytest collects from the repository root.
-      install-command: if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi; uv pip install pyyaml
+      # Works before and after a switch to uv: the locked environment when there's
+      # a uv.lock, else pyproject.toml, plus requirements.txt when present. PyYAML
+      # is for the existing scripts/tests, which pytest collects from the root.
+      install-command: if [ -f uv.lock ]; then uv sync --locked; elif [ -f pyproject.toml ]; then uv sync; fi; if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi; uv pip install pyyaml
       test-command: python -m pytest -q
       build-wait-minutes: 180
     secrets:
