@@ -26,3 +26,17 @@ Commands and results:
 - `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 2 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0 (Phase 1 and Phase 2 Verify blocks and the whole suite passed; scope inside targets; no frozen files touched).
 
 Deviations: none.
+
+## Phase 3: FastAPI app with the two concurrency endpoints
+
+**Status:** done · **Files changed:** `app/main.py`, `app/tests/test_endpoints.py`
+
+Added the FastAPI app with `GET /concurrency/multiprocessing`, a sync endpoint that fans the `runs` copies of `_price_task((paths, seed))` out over a spawn-context `multiprocessing.Pool`, and `GET /concurrency/asyncio`, an async endpoint that `asyncio.gather`s coroutines calling the same blocking task inline on the event loop. Both return a `TimingResponse` with `elapsed_seconds` and the averaged price, so the side-by-side numbers show that asyncio gives no parallelism for CPU-bound work. Both files are the plan's exact content.
+
+Commands and results:
+- `python -m pytest app/tests/test_endpoints.py -v`: 10 passed (1 StarletteDeprecationWarning from `fastapi.testclient` about httpx, not a failure).
+- Observable check `python -c "from fastapi.testclient import TestClient; from app.main import app; print(TestClient(app).get('/concurrency/asyncio', params={'paths': 500, 'runs': 1, 'seed': 1}).json())"`: printed `{'strategy': 'asyncio', 'elapsed_seconds': 0.00504..., 'option_price': 9.0354..., 'paths_per_run': 500, 'runs': 1, 'seed': 1}`.
+- Reverse collection order, `python -m pytest -q scripts/tests app/tests/test_endpoints.py app/tests/test_order_book.py app/tests/test_pricing.py`: 21 passed, 10 skipped (no order dependence, no hung pool workers).
+- `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 3 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0 (Phase 1–3 Verify blocks and the whole suite, 21 passed, 10 skipped; scope inside targets; no frozen files touched).
+
+Deviations: none.
