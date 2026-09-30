@@ -40,3 +40,17 @@ Commands and results:
 - `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 3 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0 (Phase 1–3 Verify blocks and the whole suite, 21 passed, 10 skipped; scope inside targets; no frozen files touched).
 
 Deviations: none.
+
+## Phase 4: CI wiring and combined suite
+
+**Status:** done · **Files changed:** `.github/workflows/ci.yml`
+
+Appended the plan's exact `python-tests` job to the end of the `jobs:` mapping in `.github/workflows/ci.yml`. It installs `requirements.txt` plus pytest on Python 3.12 and runs `python -m pytest app/tests scripts/tests`. No existing job or step was changed.
+
+Commands and results:
+- The Verify block's YAML assertion printed `ci job ok`.
+- `python -m pytest app/tests scripts/tests -q`: 21 passed, 10 skipped (the `scripts/tests` suites skip without helm and pwsh; in CI's `python-tests` job they skip the same way, while the existing `Tests` job still runs them with helm and pwsh).
+- `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 4 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0 (Phase 1–4 Verify blocks and the whole suite; scope inside targets; no frozen files touched).
+- Whole-feature preview, `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --base main --test-command 'python -m pytest -q'` on the committed branch: **Result: PASSED**, exit 0 (10 files changed since `main`, all inside the plan's targets; contract matches the tag; the whole suite and all four Verify blocks passed).
+
+Deviations: none. Outside the plan, before the run started, `main` got [ly2xxx/agent-platform-k3d#2](https://github.com/ly2xxx/agent-platform-k3d/pull/2), which fixed the SDLC caller workflows' install and test commands. They ran `behave`, which this repository has no features for, and pytest failed to collect `scripts/tests` without PyYAML. The feature branch was created from `main` after that fix, so no merge was needed.
