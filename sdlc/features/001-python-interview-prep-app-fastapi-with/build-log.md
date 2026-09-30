@@ -13,3 +13,16 @@ Commands and results (Python 3.12.3, fresh `.venv`):
 - `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 1 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0; scope all inside targets, no frozen files touched, contract matches the approved tag.
 
 Deviations: none.
+
+## Phase 2: Heap-backed order book
+
+**Status:** done · **Files changed:** `app/order_book.py`, `app/tests/test_order_book.py`
+
+Added `OrderBook` with bids in a max-heap (`(-price, seq, order)`) and asks in a min-heap (`(price, seq, order)`), where an `itertools.count()` sequence number breaks price ties first-in-first-out. `best_bid()` and `best_ask()` peek at the heap roots in O(1), and `add()` is O(log n); both files are the plan's exact content.
+
+Commands and results:
+- `python -m pytest app/tests/test_order_book.py -v`: 6 passed.
+- `python -m pytest -q`: 11 passed, 10 skipped.
+- `sdlc_stage.py verify --feature 001-python-interview-prep-app-fastapi-with --phase 2 --test-command 'python -m pytest -q'`: **Result: PASSED**, exit 0 (Phase 1 and Phase 2 Verify blocks and the whole suite passed; scope inside targets; no frozen files touched).
+
+Deviations: none.
