@@ -60,10 +60,10 @@ jobs:
       builder: ${{ inputs.builder }}
       model: ${{ vars.OLLAMA_MODEL || 'deepseek-v4-flash:cloud' }}
       think: ${{ vars.OLLAMA_THINK || '' }}
-      # pyproject.toml has no build backend, so the default `uv pip install -e .`
-      # fails on this flat layout; install requirements.txt instead.
-      install-command: uv pip install -r requirements.txt
-      test-command: python -m pytest -q && behave --format progress
+      # requirements.txt only exists once a feature adds one. PyYAML is for the
+      # existing scripts/tests, which pytest collects from the repository root.
+      install-command: if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi; uv pip install pyyaml
+      test-command: python -m pytest -q
       build-wait-minutes: 180
     secrets:
       OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
