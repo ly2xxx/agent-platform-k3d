@@ -1,293 +1,337 @@
-<!-- sdlc stage=plan model=glm-5.3:cloud from=intent.md,spec.md@6d49db6 -->
+<!-- sdlc stage=plan model=glm-5.3:cloud from=intent.md,spec.md@b675011 -->
 ## Approach
-The smallest change: add a root `pyproject.toml` that declares the project with exactly the four `requirements.txt` dependencies and their existing lower bounds (plus the minimal `[tool.uv] package = false` uv needs so it never tries to build the unpackaged `app/`), generate and commit `uv.lock` with `uv lock`, rewrite only the `python-tests` job in `.github/workflows/ci.yml` to install with `uv sync --locked` and run the suites with `uv run --with pytest pytest app/tests scripts/tests`, delete `requirements.txt`, add `.venv/` to `.gitignore`, and add a small pytest module (`tests/test_uv_migration.py`) that pins every one of those facts with `tomllib` and plain file reads so the checks need no network.
+Add a minimal root-level `pyproject.toml` (only a `[project]` table: name `app`, version `0.1.0`, `requires-python = ">=3.12"` matching the Python version `ci.yml` already pins, and exactly the four dependencies from `requirements.txt` with unchanged lower bounds), generate `uv.lock` with `uv lock` and commit it, switch the `python-tests` CI job from `pip install -r requirements.txt pytest` + `python -m pytest` to `setup-uv` + `uv lock --check` + `uv sync` + `uv run --with pytest pytest app/tests scripts/tests`, add `.venv/` to `.gitignore`, and delete `requirements.txt` — with structural pytest tests for every step so each phase proves itself with `python -m pytest` even on machines without uv installed.
 
 ## Coverage
 
 | Done when (intent.md) | Spec behaviours | Phase |
 | :-- | :-- | :-- |
 | A `pyproject.toml` exists declaring the project and the dependencies currently listed in `requirements.txt` (fastapi, httpx, numpy, pyyaml). | 1 | Phase 1 |
-| A `uv.lock` is committed and pins those dependencies reproducibly. | 2, 3 | Phase 2 |
-| CI installs dependencies and runs the test suite using uv commands. | 5, 6, 7 | Phase 3 |
-| `requirements.txt` is no longer used by the project's workflow; installing via `uv sync` (or equivalent) yields a working environment. | 4, 8 | Phases 3 and 4 |
-| The existing tests still pass. | 8 | Phase 4 |
+| A `uv.lock` is committed and pins those dependencies reproducibly. | 2, 3 | Phase 1 (lock generated + structural tests); Phase 2 (`uv lock --check` step in CI proves it without re-resolving) |
+| CI installs dependencies and runs the test suite using uv commands. | 5, 6 | Phase 2 |
+| `requirements.txt` is no longer used by the project's workflow; installing via `uv sync` (or equivalent) yields a working environment. | 4, 7, 8 | Phase 2 (uv sync in CI, `.venv/` ignored); Phase 3 (file deleted); the working-environment proof is the verify env installed from `pyproject.toml` plus the CI `uv sync` run on the branch |
+| The existing tests still pass. | 8 | Phases 1–3 (each Verify block runs them); final verification runs the whole suite |
 
-## Phase 1: Declare the project in pyproject.toml
+## Phase 1: pyproject.toml and uv.lock
 <!-- phase: 1 -->
-<!-- targets: pyproject.toml, tests/test_uv_migration.py -->
-<!-- frozen: requirements.txt, .github/workflows/ci.yml, .gitignore, app/__init__.py, app/main.py, app/order_book.py, app/pricing.py, app/tests/*, scripts/tests/* -->
+<!-- targets: pyproject.toml, uv.lock, tests/test_uv_lock.py -->
+<!-- frozen: requirements.txt, .gitignore, .github/workflows/ci.yml, app/**, scripts/tests/** -->
 
-**Goal:** The repository root has a `pyproject.toml` declaring a project whose `[project]` dependencies are exactly the four packages from `requirements.txt` with their existing lower bounds, and a new test module proves it by parsing the file.
+**Goal:** The repository root has a `pyproject.toml` declaring exactly the project and its four former `requirements.txt` dependencies, and a committed `uv.lock` pinning them, both proven by tests that parse the two files.
 
 **Changes:**
-- `pyproject.toml` (new, repository root) — create with exactly this content:
+- `pyproject.toml` (new, repository root): create it with exactly this content and nothing else — no `[build-system]`, no `[tool]`, no other sections:
+  ```toml
+  [project]
+  name = "app"
+  version = "0.1.0"
+  requires-python = ">=3.12"
+  dependencies = [
+      "fastapi>=0.110",
+      "httpx>=0.27",
+      "numpy>=1.26",
+      "pyyaml>=6.0",
+  ]
+  ```
+  (`>=3.12` because `.github/workflows/ci.yml` pins `python-version: "3.12"`; the four entries and lower bounds are copied verbatim from `requirements.txt`.)
+- `uv.lock` (new, repository root): generated, never hand-edited. Build-time terminal command (needs network; expect an approval prompt): run `uv lock` at the repository root with any uv release from the last year (`pip install uv` into the active environment is acceptable if uv is missing). Then run `uv lock --check`; it must exit 0. Do not add `uv.lock` to `.gitignore`; never commit a `.venv/` directory if you create one.
+- Build-time environment note (no file change): if the build machine's `python` lacks the project dependencies, run `uv sync && uv pip install pytest` once and prepend `.venv/bin` to `PATH` (or `source .venv/bin/activate`) so the Verify commands' `python` resolves to that interpreter. `.venv/` is never committed.
+- `tests/test_uv_lock.py` (new): create with exactly this content:
+  ```python
+  """Phase 1: pyproject.toml declares the project; uv.lock pins it reproducibly."""
+  import re
+  import tomllib
+  from pathlib import Path
 
-```toml
-[project]
-name = "besa-agent-platform"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "fastapi>=0.110",
-    "httpx>=0.27",
-    "numpy>=1.26",
-    "pyyaml>=6.0",
-]
+  ROOT = Path(__file__).resolve().parents[1]
 
-# `app/` is not a distributable package, so uv must install only the
-# dependencies above and never try to build the project itself.
-[tool.uv]
-package = false
-```
+  EXPECTED_DEPENDENCIES = {
+      "fastapi": ">=0.110",
+      "httpx": ">=0.27",
+      "numpy": ">=1.26",
+      "pyyaml": ">=6.0",
+  }
 
-  Notes: `requires-python = ">=3.12"` matches the `python-version: "3.12"` CI already configures; no new constraint. `[tool.uv] package = false` is the one tool section uv needs so `uv lock`/`uv sync` resolve dependencies without a build backend (there is no `[build-system]`, per the spec). No other sections.
-- `tests/test_uv_migration.py` (new) — create with exactly this content (stdlib only; `tomllib` is in the standard library on Python ≥3.11):
 
-```python
-"""Tests for the uv migration: pyproject, lockfile, CI workflow, gitignore."""
-from __future__ import annotations
+  def _normalize(name: str) -> str:
+      """PEP 503 normalization, matching how uv writes package names in the lock."""
+      return re.sub(r"[-_.]+", "-", name).lower()
 
-import re
-import tomllib
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+  def _pyproject() -> dict:
+      with (ROOT / "pyproject.toml").open("rb") as handle:
+          return tomllib.load(handle)
 
-EXPECTED_DEPENDENCIES = [
-    "fastapi>=0.110",
-    "httpx>=0.27",
-    "numpy>=1.26",
-    "pyyaml>=6.0",
-]
 
-def _load_pyproject() -> dict:
-    with (ROOT / "pyproject.toml").open("rb") as f:
-        return tomllib.load(f)
+  def _lock() -> dict:
+      with (ROOT / "uv.lock").open("rb") as handle:
+          return tomllib.load(handle)
 
-def test_pyproject_declares_project_and_exact_dependencies() -> None:
-    """Spec behaviour 1: project declared with exactly the four requirements.txt deps."""
-    project = _load_pyproject()["project"]
-    assert project["name"] == "besa-agent-platform"
-    assert project["version"] == "0.1.0"
-    assert project["requires-python"] == ">=3.12"
-    assert sorted(project["dependencies"]) == sorted(EXPECTED_DEPENDENCIES)
 
-def test_pyproject_has_no_build_system_section() -> None:
-    """Spec Interfaces: no build-system section beyond what uv needs."""
-    data = _load_pyproject()
-    assert "build-system" not in data
-    assert "project" in data
-```
+  def _parse_requirement(entry) -> tuple[str, str]:
+      """Accept both 'name>=1.0' strings and {name=..., specifier=...} tables."""
+      if isinstance(entry, str):
+          match = re.match(r"^([A-Za-z0-9._-]+)\s*(.*)$", entry.strip())
+          return _normalize(match.group(1)), match.group(2)
+      return _normalize(entry["name"]), str(entry.get("specifier", ""))
 
-  No `__init__.py` in `tests/`; the file is self-contained (locates the repo root via `Path(__file__).resolve().parents[1]`), needs no fixtures, network, or teardown.
+
+  def _dependency_name(entry) -> str:
+      """Accept both plain-string and {name = ...} dependency entries."""
+      return _normalize(entry if isinstance(entry, str) else entry["name"])
+
+
+  def test_pyproject_declares_project():
+      project = _pyproject()["project"]
+      assert project["name"] == "app"
+      assert project["version"] == "0.1.0"
+      assert project["requires-python"] == ">=3.12"
+
+
+  def test_pyproject_dependencies_are_exactly_the_former_four():
+      parsed = dict(_parse_requirement(d) for d in _pyproject()["project"]["dependencies"])
+      assert parsed == EXPECTED_DEPENDENCIES
+
+
+  def test_pyproject_has_no_extra_sections():
+      assert set(_pyproject()) == {"project"}
+
+
+  def test_uv_lock_pins_each_dependency():
+      lock = _lock()
+      packages = {_normalize(p["name"]): p for p in lock["package"]}
+      for name in EXPECTED_DEPENDENCIES:
+          assert name in packages, f"uv.lock has no entry for {name}"
+          version = packages[name]["version"]
+          assert re.fullmatch(r"\d+(\.\d+)*", version), (
+              f"{name} is not pinned to an exact version: {version!r}"
+          )
+
+
+  def test_uv_lock_requires_python_matches_pyproject():
+      assert _lock()["requires-python"] == _pyproject()["project"]["requires-python"]
+
+
+  def test_uv_lock_is_consistent_with_pyproject():
+      lock = _lock()
+      root = next(p for p in lock["package"] if _normalize(p["name"]) == "app")
+      declared = {_dependency_name(d) for d in root["dependencies"]}
+      assert declared == set(EXPECTED_DEPENDENCIES)
+      requires_dist = root.get("metadata", {}).get("requires-dist")
+      if requires_dist is not None:
+          assert dict(_parse_requirement(r) for r in requires_dist) == EXPECTED_DEPENDENCIES
+  ```
 
 **Definition of done:**
-- [ ] `tests/test_uv_migration.py::test_pyproject_declares_project_and_exact_dependencies`: proves spec behaviour 1 — parses `pyproject.toml` with `tomllib` and asserts the project name, version, `requires-python == ">=3.12"`, and that the sorted `[project] dependencies` equal the sorted four `requirements.txt` entries verbatim (`fastapi>=0.110`, `httpx>=0.27`, `numpy>=1.26`, `pyyaml>=6.0`); exact code above.
-- [ ] `tests/test_uv_migration.py::test_pyproject_has_no_build_system_section`: proves the spec's Interfaces constraint (no `build-system` key).
-- [ ] `python -m pytest app/tests -q` still passes with zero changes to `app/` (regression guard).
+- [ ] `tests/test_uv_lock.py::test_pyproject_declares_project`: proves spec behaviour 1 — parses `pyproject.toml` with `tomllib` and asserts `project.name == "app"`, `project.version == "0.1.0"`, `project.requires-python == ">=3.12"`.
+- [ ] `tests/test_uv_lock.py::test_pyproject_dependencies_are_exactly_the_former_four`: proves behaviour 1 — the parsed dependency dict equals exactly `{"fastapi": ">=0.110", "httpx": ">=0.27", "numpy": ">=1.26", "pyyaml": ">=6.0"}`, so no bounds changed and nothing was added.
+- [ ] `tests/test_uv_lock.py::test_pyproject_has_no_extra_sections`: proves the Interfaces constraint — top-level tables are exactly `{"project"}`.
+- [ ] `tests/test_uv_lock.py::test_uv_lock_pins_each_dependency`: proves behaviour 2 — each of the four names appears in a `[[package]]` entry whose `version` matches `^\d+(\.\d+)*$` (fully pinned).
+- [ ] `tests/test_uv_lock.py::test_uv_lock_requires_python_matches_pyproject`: proves behaviour 2 — the lock's `requires-python` equals the pyproject's.
+- [ ] `tests/test_uv_lock.py::test_uv_lock_is_consistent_with_pyproject`: proves behaviour 3 structurally (the machine-readable emulation of `uv lock --check`) — the root `app` package in `uv.lock` depends on exactly the four names, and its `requires-dist` metadata matches the pyproject dependencies when present.
+- [ ] All six tests are pure file reads: no fixtures, no background processes, no teardown needed.
+- [ ] Observable check: `uv lock --check` exits 0 at the repository root during the build (run once, after `uv lock`); Phase 2 adds the same command to CI so it keeps being proven.
 
 **Verify:**
 ```bash
-python -m pytest tests/test_uv_migration.py -v
+python -m pytest tests/test_uv_lock.py -v
 python -m pytest app/tests -q
 ```
 
 **Attempt budget:** 3 failed attempts, then stop and revise this plan instead of retrying.
 
-## Phase 2: Generate and commit uv.lock
+## Phase 2: CI through uv and `.venv` ignored
 <!-- phase: 2 -->
-<!-- targets: uv.lock, tests/test_uv_migration.py -->
-<!-- frozen: pyproject.toml, requirements.txt, .github/workflows/ci.yml, .gitignore, app/__init__.py, app/main.py, app/order_book.py, app/pricing.py, app/tests/*, scripts/tests/* -->
+<!-- targets: .github/workflows/ci.yml, .gitignore, tests/test_ci_workflow.py -->
+<!-- frozen: pyproject.toml, uv.lock, requirements.txt, app/**, scripts/tests/**, tests/test_uv_lock.py -->
 
-**Goal:** A machine-generated `uv.lock` is committed at the repository root, pins fully resolved versions for the four direct dependencies and their transitive dependencies, and `uv lock --check` succeeds without re-resolving.
+**Goal:** The `python-tests` CI job installs and tests through uv commands with no reference to `requirements.txt`, and `.gitignore` ignores `.venv/` while `uv.lock` stays trackable.
 
 **Changes:**
-- `uv.lock` (new, repository root) — generated, never hand-edited: run `uv lock` from the repository root once (this is the one required terminal command in this phase; approve it at the prompt). It resolves the four declared dependencies and writes `uv.lock`. Commit the file exactly as generated. If `uv` is not installed on the builder machine, install it first by the user's normal method; do not commit any uv config beyond this file.
-- `tests/test_uv_migration.py` — append these functions (uses the existing `EXPECTED_DEPENDENCIES`, `ROOT`, `re`, `tomllib`):
+- `.github/workflows/ci.yml`: replace the entire `python-tests` job (and only that job — do not touch the `chart`, `tests`, or `secrets` jobs, the triggers, or the runners). Replace:
+  ```yaml
+    python-tests:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: actions/setup-python@v5
+          with:
+            python-version: "3.12"
+        - run: pip install -r requirements.txt pytest
+        - run: python -m pytest app/tests scripts/tests
+  ```
+  with:
+  ```yaml
+    python-tests:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - uses: astral-sh/setup-uv@v5
+          with:
+            python-version: "3.12"
+        - name: Lockfile is current
+          run: uv lock --check
+        - name: Install pinned dependencies
+          run: uv sync
+        - name: Unit tests
+          run: uv run --with pytest pytest app/tests scripts/tests
+  ```
+  `setup-uv` with `python-version: "3.12"` provides both uv and a managed Python 3.12 (same version the job used before); `uv sync` installs from `uv.lock`; `--with pytest` supplies pytest ephemerally, keeping pytest out of the project dependencies and introducing no `[dependency-groups]` section (per the spec's open-question assumption); `uv lock --check` makes criterion 3 a runtime proof on every CI run.
+- `.gitignore`: append the single line `.venv/` (with the file's existing trailing-newline style preserved). If an equivalent `.venv` entry already exists, leave the file otherwise unchanged. Do not add anything else and do not add `uv.lock`.
+- `tests/test_ci_workflow.py` (new): create with exactly this content:
+  ```python
+  """Phase 2: CI installs and tests through uv; .venv is gitignored."""
+  import re
+  import subprocess
+  from pathlib import Path
 
-```python
-def _load_uv_lock() -> dict:
-    with (ROOT / "uv.lock").open("rb") as f:
-        return tomllib.load(f)
+  import yaml
 
-def _is_pinned(version: str) -> bool:
-    return bool(re.fullmatch(r"\d+(\.\d+)*", version))
+  ROOT = Path(__file__).resolve().parents[1]
+  CI = ROOT / ".github" / "workflows" / "ci.yml"
 
-def test_uv_lock_pins_all_direct_dependencies() -> None:
-    """Spec behaviour 2: fastapi, httpx, numpy, pyyaml pinned at concrete versions."""
-    packages = {p["name"].lower(): p["version"] for p in _load_uv_lock()["package"]}
-    for dep in EXPECTED_DEPENDENCIES:
-        name = re.split(r"[><=!~\[]", dep)[0].strip().lower()
-        assert name in packages, f"{name} missing from uv.lock"
-        assert _is_pinned(packages[name]), packages[name]
 
-def test_uv_lock_pins_every_transitive_package() -> None:
-    """Spec behaviour 2: every entry in uv.lock is a fully resolved version."""
-    lock_packages = _load_uv_lock()["package"]
-    names = [p["name"] for p in lock_packages]
-    assert len(names) == len(set(names))
-    for p in lock_packages:
-        assert _is_pinned(p["version"]), (p["name"], p["version"])
+  def _python_tests_job() -> dict:
+      workflow = yaml.safe_load(CI.read_text())
+      return workflow["jobs"]["python-tests"]
 
-def test_uv_lock_is_not_gitignored() -> None:
-    """Spec behaviour 2: uv.lock is committed, not ignored."""
-    for raw in (ROOT / ".gitignore").read_text().splitlines():
-        assert raw.strip() != "uv.lock"
-```
+
+  def _run_steps(job: dict) -> list:
+      return [s["run"] for s in job["steps"] if isinstance(s, dict) and "run" in s]
+
+
+  def test_workflow_never_mentions_requirements_txt():
+      assert "requirements.txt" not in CI.read_text()
+
+
+  def test_python_tests_installs_with_uv_sync_and_no_pip():
+      steps = _run_steps(_python_tests_job())
+      assert any(re.search(r"(^|\s)uv sync(\s|$)", s) for s in steps)
+      assert not any("pip install" in s for s in steps)
+
+
+  def test_python_tests_verifies_lockfile_is_current():
+      steps = _run_steps(_python_tests_job())
+      assert any("uv lock --check" in s for s in steps)
+
+
+  def test_python_tests_runs_suites_through_uv_run_pytest():
+      steps = _run_steps(_python_tests_job())
+      pytest_steps = [s for s in steps if "pytest" in s]
+      assert pytest_steps, "expected at least one pytest step"
+      assert all("uv run" in s for s in pytest_steps)
+      assert not any(re.search(r"(^|\s)python -m pytest", s) for s in steps)
+      joined = "\n".join(pytest_steps)
+      assert "app/tests" in joined
+      assert "scripts/tests" in joined
+
+
+  def test_gitignore_lists_venv():
+      lines = (ROOT / ".gitignore").read_text().splitlines()
+      assert ".venv/" in [line.strip() for line in lines]
+
+
+  def test_venv_directory_is_gitignored():
+      result = subprocess.run(["git", "check-ignore", "-q", ".venv"], cwd=ROOT)
+      assert result.returncode == 0
+
+
+  def test_uv_lock_is_not_gitignored():
+      result = subprocess.run(["git", "check-ignore", "-q", "uv.lock"], cwd=ROOT)
+      assert result.returncode != 0
+  ```
 
 **Definition of done:**
-- [ ] `tests/test_uv_migration.py::test_uv_lock_pins_all_direct_dependencies`: proves spec behaviour 2 for the direct deps — parses `uv.lock` with `tomllib`, builds a `{name: version}` map from the `[[package]]` entries, and asserts each of the four dependency names extracted from `EXPECTED_DEPENDENCIES` is present with a concrete `X.Y[.Z]` version (no range operators); exact code above.
-- [ ] `tests/test_uv_migration.py::test_uv_lock_pins_every_transitive_package`: proves transitive dependencies are also pinned (every version matches `\d+(\.\d+)*`, no duplicate package entries).
-- [ ] `tests/test_uv_migration.py::test_uv_lock_is_not_gitignored`: proves the lockfile is not excluded by `.gitignore`.
-- [ ] `uv lock --check` exits 0: proves spec behaviour 3 (lockfile consistent with `pyproject.toml`, no re-resolving) and that the lock matches the committed `pyproject.toml` from Phase 1.
+- [ ] `tests/test_ci_workflow.py::test_workflow_never_mentions_requirements_txt`: proves spec behaviour 5 — the string `requirements.txt` appears nowhere in `ci.yml`, so no step installs from it.
+- [ ] `tests/test_ci_workflow.py::test_python_tests_installs_with_uv_sync_and_no_pip`: proves behaviour 5 — a `python-tests` step runs `uv sync`, and no `python-tests` step runs `pip install`.
+- [ ] `tests/test_ci_workflow.py::test_python_tests_verifies_lockfile_is_current`: proves behaviour 3 at runtime — CI runs `uv lock --check` every build.
+- [ ] `tests/test_ci_workflow.py::test_python_tests_runs_suites_through_uv_run_pytest`: proves behaviour 6 — both suites CI already runs (`app/tests` and `scripts/tests`, matching the current `python -m pytest app/tests scripts/tests` step) are invoked through `uv run ... pytest`, never via bare `python -m pytest`.
+- [ ] `tests/test_ci_workflow.py::test_gitignore_lists_venv` and `::test_venv_directory_is_gitignored`: prove behaviour 7 — `.venv/` is listed in `.gitignore` and `git check-ignore` accepts `.venv`. No cleanup needed: `git check-ignore` never reads whether the path exists.
+- [ ] `tests/test_ci_workflow.py::test_uv_lock_is_not_gitignored`: proves behaviour 2's "committed, not gitignored" half — `git check-ignore uv.lock` returns non-zero.
+- [ ] All tests are file reads plus short-lived `git check-ignore` subprocesses: no servers, threads, or fixtures to tear down. PyYAML is already a project dependency, so `import yaml` needs nothing new.
+- [ ] Observable check: behaviour 8's end-to-end run happens as the CI run on this branch's pull request; locally it is proven structurally by the tests above.
 
 **Verify:**
 ```bash
-uv lock --check
-python -m pytest tests/test_uv_migration.py -v
+python -m pytest tests/test_ci_workflow.py -v
 python -m pytest app/tests -q
+test -z "$(grep -n requirements.txt .github/workflows/ci.yml || true)"
 ```
 
 **Attempt budget:** 3 failed attempts, then stop and revise this plan instead of retrying.
 
-## Phase 3: Switch CI to uv and retire requirements.txt
+## Phase 3: Retire requirements.txt
 <!-- phase: 3 -->
-<!-- targets: .github/workflows/ci.yml, .gitignore, requirements.txt, tests/test_uv_migration.py -->
-<!-- frozen: pyproject.toml, uv.lock, app/__init__.py, app/main.py, app/order_book.py, app/pricing.py, app/tests/*, scripts/tests/* -->
+<!-- targets: requirements.txt, tests/test_requirements_retired.py -->
+<!-- frozen: pyproject.toml, uv.lock, .github/workflows/ci.yml, .gitignore, app/**, scripts/tests/**, tests/test_uv_lock.py, tests/test_ci_workflow.py -->
 
-**Goal:** The `python-tests` CI job installs with `uv sync --locked` and runs both existing suites through `uv run`, `requirements.txt` is deleted, `.gitignore` ignores `.venv/`, and tests prove all of it by reading the files as text.
+**Goal:** `requirements.txt` is deleted from the repository and nothing references it, while `pyproject.toml` and `uv.lock` remain the single source of dependencies and the existing suites still pass.
 
 **Changes:**
-- `.github/workflows/ci.yml` — replace the entire `python-tests` job with exactly:
+- `requirements.txt`: delete the file. Nothing references it after Phase 2 (Phase 2's `test_workflow_never_mentions_requirements_txt` proves CI does not, and no other workflow or script in the repository reads it — the `tests` CI job installs `pyyaml` directly, not from the file).
+- `tests/test_requirements_retired.py` (new): create with exactly this content:
+  ```python
+  """Phase 3: requirements.txt is retired; pyproject/uv.lock are the single source."""
+  import re
+  import tomllib
+  from pathlib import Path
 
-```yaml
-  python-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install uv
-        run: pip install uv
-      - name: Install dependencies from the lockfile
-        run: uv sync --locked
-      - name: Run the test suites through uv
-        run: uv run --with pytest pytest app/tests scripts/tests
-```
+  ROOT = Path(__file__).resolve().parents[1]
 
-  Every other job (`chart`, `tests`, `secrets`) is untouched, including the `tests` job's `pip install pyyaml` / `python -m unittest discover -s scripts/tests` step (it does not install from `requirements.txt`; see Open questions). `--with pytest` is uv's equivalent of today's ad-hoc `pip install ... pytest`, keeping pytest out of the project's four declared dependencies and out of any `[dependency-groups]` section, per the spec.
-- `requirements.txt` — delete it (`git rm requirements.txt`).
-- `.gitignore` — append these two lines at the end (skip if a `.venv` entry already exists):
+  EXPECTED = {"fastapi", "httpx", "numpy", "pyyaml"}
 
-```
-# uv's default virtual environment directory
-.venv/
-```
-- `tests/test_uv_migration.py` — append:
 
-```python
-def test_requirements_txt_is_deleted() -> None:
-    """Spec behaviour 4: requirements.txt no longer exists."""
-    assert not (ROOT / "requirements.txt").exists()
+  def _normalize(name: str) -> str:
+      return re.sub(r"[-_.]+", "-", name).lower()
 
-def test_ci_installs_and_tests_through_uv() -> None:
-    """Spec behaviours 5 and 6: CI installs via uv and runs the suites through uv."""
-    content = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
-    assert "requirements.txt" not in content
-    assert "python -m pytest" not in content
-    assert "uv sync" in content
-    assert "uv run --with pytest pytest app/tests scripts/tests" in content
 
-def test_gitignore_ignores_uv_venv() -> None:
-    """Spec behaviour 7: .venv is gitignored so uv sync artifacts stay local."""
-    lines = [line.strip() for line in (ROOT / ".gitignore").read_text().splitlines()]
-    assert ".venv" in lines or ".venv/" in lines
-```
+  def test_requirements_txt_is_deleted():
+      assert not (ROOT / "requirements.txt").exists()
+
+
+  def test_pyproject_still_declares_exactly_the_four_dependencies():
+      with (ROOT / "pyproject.toml").open("rb") as handle:
+          deps = tomllib.load(handle)["project"]["dependencies"]
+      names = {_normalize(re.match(r"^([A-Za-z0-9._-]+)", d).group(1)) for d in deps}
+      assert names == EXPECTED
+
+
+  def test_uv_lock_still_pins_the_four_dependencies():
+      with (ROOT / "uv.lock").open("rb") as handle:
+          lock = tomllib.load(handle)
+      names = {_normalize(p["name"]) for p in lock["package"]}
+      assert EXPECTED <= names
+  ```
 
 **Definition of done:**
-- [ ] `test ! -e requirements.txt` passes: spec behaviour 4, the file is gone.
-- [ ] `tests/test_uv_migration.py::test_ci_installs_and_tests_through_uv`: proves spec behaviours 5 and 6 — reads `.github/workflows/ci.yml` as text and asserts no `requirements.txt` reference, no bare `python -m pytest`, an installation step containing `uv sync`, and the exact `uv run --with pytest pytest app/tests scripts/tests` invocation (CI already runs `scripts/tests`, so criterion 6 covers it).
-- [ ] `tests/test_uv_migration.py::test_gitignore_ignores_uv_venv`: proves spec behaviour 7 (`.venv` or `.venv/` line present in `.gitignore`).
-- [ ] `uv lock --check` still passes: deleting `requirements.txt` and touching CI did not disturb the lock.
+- [ ] `tests/test_requirements_retired.py::test_requirements_txt_is_deleted`: proves spec behaviour 4 — `requirements.txt` does not exist at the repository root.
+- [ ] `tests/test_requirements_retired.py::test_pyproject_still_declares_exactly_the_four_dependencies` and `::test_uv_lock_still_pins_the_four_dependencies`: regression guards proving behaviours 1 and 2 still hold after the retirement — the four dependencies live only in `pyproject.toml`/`uv.lock`, with nothing lost in the deletion.
+- [ ] All tests are pure file reads: no fixtures, no teardown.
+- [ ] Observable check: `test ! -e requirements.txt` in the Verify block, plus the existing suites (`app/tests`, `scripts/tests`) passing in an environment installed from `pyproject.toml` — the local equivalent of behaviour 8's "uv sync yields a working environment" (the authoritative `uv sync` proof is the Phase 2 CI job on the pull request).
 
 **Verify:**
 ```bash
-test ! -e requirements.txt
-uv lock --check
-python -m pytest tests/test_uv_migration.py -v
-python -m pytest app/tests -q
-```
-
-**Attempt budget:** 3 failed attempts, then stop and revise this plan instead of retrying.
-
-## Phase 4: Prove the existing suites pass and guard against regressions
-<!-- phase: 4 -->
-<!-- targets: tests/test_uv_migration.py -->
-<!-- frozen: pyproject.toml, uv.lock, .github/workflows/ci.yml, .gitignore, app/__init__.py, app/main.py, app/order_book.py, app/pricing.py, app/tests/*, scripts/tests/* -->
-
-**Goal:** The existing `app/tests` and `scripts/tests` suites pass unmodified under the migrated setup (run exactly as CI runs them), and a final guard test asserts no workflow file anywhere outside the feature documents still references `requirements.txt`.
-
-**Changes:**
-- `tests/test_uv_migration.py` — append:
-
-```python
-def test_no_requirements_txt_references_outside_feature_docs() -> None:
-    """Spec behaviour 4: nothing outside the feature docs still uses requirements.txt."""
-    skip_dir_names = {".git", ".venv", "__pycache__", ".pytest_cache", "sdlc", "rendered"}
-    text_suffixes = {".py", ".yml", ".yaml", ".toml", ".md", ".txt", ".ps1",
-                     ".cfg", ".ini", ".tpl", ""}
-    offenders: list[str] = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or path.is_symlink():
-            continue
-        rel_parts = path.relative_to(ROOT).parts
-        if any(part in skip_dir_names for part in rel_parts[:-1]):
-            continue
-        if path.suffix not in text_suffixes:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, ValueError):
-            continue
-        if "requirements.txt" in text:
-            offenders.append(str(path.relative_to(ROOT)))
-    assert offenders == []
-```
-
-  No fixtures, no network, no teardown: pure filesystem reads. `sdlc/` is skipped because this plan and the feature documents legitimately name the file.
-- No other files change; the suite run in Verify uses the untouched `app/tests/*` and `scripts/tests/*` files, proving the migration required no test modification (spec behaviour 8).
-
-**Definition of done:**
-- [ ] `tests/test_uv_migration.py::test_no_requirements_txt_references_outside_feature_docs`: proves `requirements.txt` is fully retired from the workflow — walks every text file in the repo (skipping `.git`, `.venv`, caches, `rendered/`, and `sdlc/`) and asserts none mentions `requirements.txt`.
-- [ ] `python -m pytest app/tests scripts/tests -q` passes: proves spec behaviour 8 — both suites CI runs today pass without any modification to their files, in the environment built from `pyproject.toml`/`uv.lock`.
-- [ ] `uv lock --check` passes on the finished state: end-to-end consistency of `pyproject.toml` and `uv.lock`.
-
-**Verify:**
-```bash
-uv lock --check
-python -m pytest tests/test_uv_migration.py -v
+python -m pytest tests/test_requirements_retired.py -v
 python -m pytest app/tests scripts/tests -q
+test ! -e requirements.txt
 ```
 
 **Attempt budget:** 3 failed attempts, then stop and revise this plan instead of retrying.
 
 ## Risks
-- **The verify harness may install the project with `pip install .`** rather than uv; with no `[build-system]` and `[tool.uv] package = false`, setuptools' flat-layout discovery would fail. Phase 1's Verify (run against a harness-built environment) catches this immediately; the remedy would be revising the plan to add a minimal build backend, which would need a spec amendment.
-- **`uv` may be absent (or older than `--check`) in the verify environment.** Phase 2's `uv lock --check` catches it. Fallback if so: `uv lock --locked` on older versions, or restructuring behaviour 3's proof as a `tomllib` comparison of the lock's recorded requirements against `pyproject.toml`.
-- **`uv lock --check` could want network on a cold cache.** Phase 2's Verify catches it; the lock is consistent by construction, so a failure means the environment, not the lock, and the plan gets revised.
-- **Builder's uv version may emit a lock revision the verify env's uv dislikes.** Phase 2's Verify (`uv lock --check`) catches the mismatch on the committed lockfile.
-- **`scripts/tests` may secretly require `helm`.** CI's `python-tests` job already runs them under plain pytest without helm, so they must skip or pass; Phase 4's `python -m pytest app/tests scripts/tests -q` is the check that would catch any local-environment difference (a pre-existing condition, not one this plan introduces).
-- **CI's `uv run --with pytest` needs network** to fetch pytest on the runner. No Verify block depends on it (they use `python -m pytest`), so only the CI run itself is exposed, exactly as today's `pip install ... pytest` is.
-- **Deleting `requirements.txt` or editing CI could leave a stale reference** (e.g. in docs). Phase 4's guard test catches it.
+- **uv.lock TOML layout varies across uv versions** (`requires-dist` as inline tables vs strings, `editable` vs `virtual` source for the root). Phase 1's tests parse tolerantly (string-or-table helpers, name-based root lookup) and assert invariants, and the authoritative check is the builder's `uv lock --check` in Phase 1 plus the `uv lock --check` CI step in Phase 2 — a format surprise is caught at Phase 1's Verify or in Phase 2's CI run, not silently.
+- **The verify job pip-installs the project from the new `pyproject.toml`**, exercising the implicit setuptools backend and flat-layout auto-discovery. `app` is the only top-level directory with an `__init__.py` (`tests/` deliberately has none), so discovery is unambiguous; if packaging failed, Phase 1's Verify block would fail immediately and loudly.
+- **Environment parity drift**: the verify env resolves the lower bounds via pip while CI pins via `uv sync` from `uv.lock`. The committed lock plus `uv lock --check` in CI keep them convergent; divergence would surface as a CI failure on the branch, which is exactly behaviour 8's runtime proof.
+- **`git check-ignore` (Phase 2 tests) needs git**, which every verification checkout is by definition (the pipeline itself uses `git show <tag>:<path>`). The `.venv/` requirement is additionally proven without git by `test_gitignore_lists_venv`, so a git-less anomaly would still be caught on the lock side only.
+- **PyYAML parses the workflow's `on:` key as boolean `True`**; the Phase 2 tests traverse only `["jobs"]["python-tests"]`, so this quirk is harmless — a wrong traversal would fail Phase 2's Verify immediately.
+- **Deleting `requirements.txt` (Phase 3) can only break something that still references it**; Phase 2's `test_workflow_never_mentions_requirements_txt` and Phase 3's full existing-suite run catch any leftover reference.
 
 ## Open questions
-- **Is uv available in the verification environment?** Assumed yes: "How verification runs" installs the project from `pyproject.toml`, which after this migration is a uv-native operation. If not, Phase 2's Verify fails at the first attempt and the plan is revised (see Risks).
-- **Project name and `requires-python`:** assumed `besa-agent-platform` (the Helm chart / repo name, a valid PEP 508 name) and `>=3.12` (the version CI's `setup-python` pins). No new Python constraint is invented.
-- **`[tool.uv] package = false`:** the spec's Interfaces example omits it, but it is required for uv to resolve and sync dependencies without a build backend, since `app/` is not a distributable package and the spec forbids a `[build-system]`. Treated as "what uv needs for dependency resolution", which the spec allows.
-- **pytest provisioning:** per the spec's own assumption, no `[dependency-groups]` is added; pytest stays ad hoc, now via `uv run --with pytest` instead of `pip install ... pytest`.
-- **The `tests` CI job (chart/manifests)** keeps `pip install pyyaml` and `python -m unittest discover -s scripts/tests`. It never installs from `requirements.txt`, and behaviour 6 is satisfied by the `python-tests` job invoking both suites through `uv run`. Assumed this is the intended reading of "changes to ci.yml" in the spec's Interfaces.
-- **Fate of `requirements.txt`:** deleted, per the intent's own assumption.
+- **Project name**: `name = "app"` (matches the package directory, PEP 508-valid); uv requires a name to lock, and the spec's assumption says to derive it from the repo/package.
+- **Python version**: `requires-python = ">=3.12"`, taken from `ci.yml`'s existing `python-version: "3.12"`; no new constraint invented.
+- **`scripts/tests/` in CI**: CI already runs them (in the `python-tests` job via `python -m pytest app/tests scripts/tests`), so they continue to run through `uv run ... pytest`. The separate `tests` job's `python -m unittest discover -s scripts/tests` is left untouched: it does not install from `requirements.txt` (behaviour 5 is satisfied) and it exists to check chart credentials alongside helm and pwsh; converting it is outside this feature's scope.
+- **pytest in CI**: obtained ephemerally via `uv run --with pytest pytest ...`, preserving the current mechanism (pytest installed alongside, never a project dependency) and adding no `[dependency-groups]` section, per the spec's assumption.
+- **uv on verification machines is not guaranteed**, so Verify blocks use `python -m pytest` with structural lock checks; the real `uv lock --check` runs at build time (Phase 1) and as a CI step (Phase 2). Behaviour 8's clean-checkout proof is the CI run on the pull request itself.
 
 ## Hand back
 When every phase is built and its Verify block passes:
