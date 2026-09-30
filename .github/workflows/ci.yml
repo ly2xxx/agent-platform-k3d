@@ -113,8 +113,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest
-      - run: python -m pytest app/tests scripts/tests
+      - name: Lockfile is current
+        run: uv lock --check
+      - name: Install pinned dependencies
+        run: uv sync
+      - name: Unit tests
+        run: uv run --with pytest pytest app/tests scripts/tests
